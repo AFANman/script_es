@@ -1,0 +1,65 @@
+# 仅跟踪代码文件；忽略生成物、依赖、缓存与本地环境
+
+# 操作系统与编辑器杂项
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE/编辑器配置（保留必要的工程文件即可）
+.vscode/
+.idea/
+*.iml
+
+# Python 通用忽略
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# Python 构建与打包
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Python 测试与工具缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+coverage/
+.coverage*
+htmlcov/
+
+# Node/前端（如项目包含）
+node_modules/
+dist/
+out/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 环境变量与本地配置
+.env
+.env.*
+*.env
+.local.env
+
+# 项目产物与大文件
+screenshots/
+activity_items.json
+python/.easyocr/
+
+# 日志与临时文件
+*.log
+logs/
+.log/
