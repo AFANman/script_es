@@ -11,21 +11,29 @@
 
 ## 模块与结构（Architecture）
 - 采集模块：`python/capture/`
-  - `main.py`：采集启动器（最小命令即可运行）。
-  - `orchestrator.py`：截图/滚动/翻页编排与默认参数计算（自动滑动、自动翻页坐标、末页补滑）。
-  - `adb_client.py`：ADB 封装（设备连接、截图、滑动、点击、按键）。
+  - 三层架构（Tidy First）：
+    - `adb_client.py`：基础 ADB 封装（设备连接、截图、滑动、点击、按键）。
+    - `abd_command.py`：基于 `adb_client` 的原子业务操作封装（`ensure_dir`、`wait`、`tap`、`capture`）。
+    - `activity_flows.py`：编排 `abd_command` 的原子操作以达成业务流程（积分线、奖杯分数线）。
+  - 启动入口：
+    - `flows_main.py`：活动积分/奖杯分数线执行模板（调用 `activity_flows`，输出到 `captures/`）。
+    - `main.py`：分页滚动采集启动器（调用 `orchestrator.py`，支持自动滑动与翻页）。
+  - `orchestrator.py`：通用截图/滚动/翻页编排与默认参数计算（自动滑动、自动翻页坐标、末页补滑）。
 - 解析模块：`python/parse/`
   - `main.py`：解析启动器（默认读取 `screenshots` 输出 `activity_items.json`）。
   - `activity_parser.py`：解析核心逻辑（行对齐、分数识别、噪声过滤）。
 
 ## 快速使用（Quick Start）
 - 安装依赖：`python -m pip install -r python/requirements.txt`
-- 采集：`python python/capture/main.py`
+- 活动脚本（积分线/奖杯分数线）：`python -m python.capture.flows_main`
+- 分页滚动采集：`python python/capture/main.py`
 - 解析：`python python/parse/main.py`
 
 可选覆盖：
 - 指定设备：`python python/capture/main.py --device-id 192.168.0.101:5555`
 - 点击滚动：`python python/capture/main.py --mode tap`
+ - 活动脚本输出根目录：`python -m python.capture.flows_main --out-root captures`
+ - 活动脚本等待间隔：`python -m python.capture.flows_main --wait-seconds 1.0`
 - 按键滚动：`python python/capture/main.py --mode keyevent`
 
 默认行为（Defaults）
@@ -59,3 +67,10 @@
 ## 参考（References）
 - 用法与示例：见 `README.md`。
 - 进阶参数与 Node 用法：见 `AGENTS.md`。
+
+## 当前输出（Outputs）
+- 活动脚本：
+  - `captures/point_line/point_line_01.png` ～ `point_line_04.png`
+  - `captures/trophy_line/trophy_line_01.png` ～ `trophy_line_04.png`
+- 分页滚动采集：
+  - 默认输出到 `capture/`（可用 `--prefix` 覆盖）

@@ -219,3 +219,106 @@ def save_json(out_path: str, data: Dict):
     import json
     with open(out_path, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def parse_rank_page(reader: easyocr.Reader, image_path: str, read_options: Dict | None = None) -> List[Dict]:
+    """
+    解析排名页面截图，返回 [{rank, score}]
+    """
+    read_options = read_options or {}
+    # 简单读取，不使用复杂参数
+    results = reader.readtext(image_path, detail=1, paragraph=False)
+    if not results:
+        return []
+
+    words = []
+    for bbox, text, conf in results:
+        t = (text or '').strip()
+        if not t: continue
+        x0, y0 = _bbox_min_xy(bbox)
+        x1, y1 = _bbox_max_xy(bbox)
+        words.append({'text': t, 'x0': x0, 'y0': y0, 'x1': x1, 'y1': y1, 'conf': conf})
+
+    rank_regex = re.compile(r'^(\d+)\s*(?:位|位~|Rank)?$')
+    score_regex = re.compile(r'^(\d{1,3}(?:,\d{3})+|\d{4,})$')
+
+    ranks = []
+    scores = []
+    width = max(w['x1'] for w in words) if words else 1000
+
+    for w in words:
+        rm = rank_regex.match(w['text'])
+        if rm and w['x0'] < width * 0.5:
+            ranks.append({'val': int(rm.group(1)), 'y': (w['y0'] + w['y1']) / 2, 'obj': w})
+            continue
+        
+        if score_regex.match(w['text']):
+             s_val = int(w['text'].replace(',', ''))
+             # 简单过滤：积分通常较大
+             if s_val > 0:
+                 scores.append({'val': s_val, 'y': (w['y0'] + w['y1']) / 2, 'obj': w})
+
+    pairs = []
+    for r in ranks:
+        best_s = None
+        min_dist = 100  # Y 轴距离阈值
+        for s in scores:
+            dist = abs(r['y'] - s['y'])
+            # 积分通常在排名右侧
+            if dist < min_dist and s['obj']['x0'] > r['obj']['x0']:
+                min_dist = dist
+                best_s = s
+        
+        if best_s:
+            pairs.append({'rank': r['val'], 'score': best_s['val']})
+    
+    # 按排名排序
+    pairs.sort(key=lambda x: x['rank'])
+    return pairs
+
+
+def parse_bottom_start_rank(reader: easyocr.Reader, image_path: str) -> int | None:
+    """
+    解析页面底部的起始排名（例如 "420位~" -> 420）
+    直接识别底部整行，不再硬编码左右边界
+    """
+    img = cv2.imread(image_path)
+    if img is None: return None
+    
+    h, w = img.shape[:2]
+    # 仅截取底部 15% 的高度，宽度取全屏
+    # 这样可以避开上面的列表内容，但保留整个底部栏
+    t, b = int(h * 0.85), h
+    
+    crop = img[t:b, :]
+    if crop.size == 0: return None
+    
+    # 预处理：转灰度 + 放大
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    gray = cv2.resize(gray, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
+    
+    results = reader.readtext(gray, detail=0)
+    
+    # 调试输出
+    # print(f"[DEBUG] Bottom OCR raw results: {results}")
+    
+    # 寻找包含 "位~" 或 "位" 的文本，或者纯数字
+    # 底部排名通常是页面上唯一的独立大数字或带位~的文本
+    for text in results:
+        clean_text = text.replace(',', '').replace(' ', '')
+        
+        # 优先匹配带 "位~" 或 "位" 的
+        if '位' in clean_text or '~' in clean_text:
+            match = re.search(r'(\d+)', clean_text)
+            if match:
+                return int(match.group(1))
+                
+    # 如果没找到带单位的，尝试找独立的纯数字（且数值较大，不是页码1/2这种）
+    for text in results:
+        clean_text = text.replace(',', '').replace(' ', '').replace('~', '')
+        if clean_text.isdigit():
+            val = int(clean_text)
+            if val > 10: # 简单的过滤，假设排名通常大于10
+                return val
+            
+    return None
