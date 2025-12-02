@@ -191,34 +191,34 @@ class AdbClient:
             # 粗略检查是否包含 IEND chunk
             return b'IEND' in b
 
-        # 优先尝试 exec-out 二进制输出
+        # 1. 尝试直接 exec-out (更快，且不需要中间文件)
+        # 某些模拟器或旧版 Android 可能输出损坏的 PNG，需要异常处理回退
         try:
-            data = self.exec_bytes(['exec-out', 'screencap', '-p'], timeout=max(5, self.default_timeout))
-            # 某些设备会返回 CRLF，需归一化
-            data = data.replace(b'\r\n', b'\n')
-            if _is_valid_png(data):
+            cmd = self._cmd(['exec-out', 'screencap', '-p'])
+            # print(f"[ADB BIN] {' '.join(cmd)}")
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+            
+            # 简单的 PNG 头部检查 (8 bytes)
+            # PNG Header: 89 50 4E 47 0D 0A 1A 0A
+            if proc.returncode == 0 and len(proc.stdout) > 8 and proc.stdout.startswith(b'\x89PNG\r\n\x1a\n'):
                 os.makedirs(os.path.dirname(local_path) or '.', exist_ok=True)
                 with open(local_path, 'wb') as f:
-                    f.write(data)
+                    f.write(proc.stdout)
                 return
             else:
-                print('exec-out 得到的截图疑似无效PNG，尝试回退到远端临时文件方案')
+                # 如果 returncode != 0 或者不是 PNG，打印警告并回退
+                pass
+                # print(f"exec-out 得到的截图疑似无效PNG，尝试回退到远端临时文件方案")
         except Exception as e:
-            print(f"exec-out 方式失败，回退到远端临时文件: {e}")
-
-        # 回退方案：写远端再 pull
-        remote_path = '/data/local/tmp/screencap.png'
+            print(f"exec-out 失败: {e}，尝试回退")
+            
+        # 2. 回退方案：先保存到手机 /sdcard/，再 pull 下来
+        # 注意：/data/local/tmp/ 在部分模拟器上可能没有写权限 (Permission denied)，
+        # 所以改为更通用的 /sdcard/
+        remote_path = "/sdcard/screencap_temp.png"
         self.exec_text(['shell', 'screencap', '-p', remote_path])
         os.makedirs(os.path.dirname(local_path) or '.', exist_ok=True)
         self.exec_text(['pull', remote_path, local_path])
-        # 最后再做一次轻量校验，若仍不合法，抛错提示
-        try:
-            with open(local_path, 'rb') as f:
-                data = f.read()
-            if not _is_valid_png(data):
-                raise RuntimeError('通过远端临时文件获取的截图仍非有效PNG，请检查设备兼容性与ADB版本')
-        except Exception as e:
-            raise RuntimeError(f'截图保存失败或文件损坏: {e}')
 
     def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 500) -> None:
         """执行滑动手势。
