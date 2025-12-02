@@ -586,8 +586,15 @@ def main():
         results.append(res)
         
     # 3. 输出最终 JSON
+    # 提取关键排名的积分
+    key_ranks = [100, 1000, 5000, 10000]
+    targets_rank_score = {}
+    for r in key_ranks:
+        if r in anchors:
+            targets_rank_score[str(r)] = anchors[r]
+            
     final_data = {
-        'anchors': anchors,
+        'targetsRankScore': targets_rank_score,
         'targets': results
     }
     
