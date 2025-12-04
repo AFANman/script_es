@@ -541,6 +541,95 @@ def find_target_score(client: AdbClient, reader: easyocr.Reader, target_score: i
     print(f"[Target: {target_score:,}] 达到最大翻页次数，未找到精确匹配。")
     return {'target': target_score, 'error': 'Not found within limit', 'elapsed': time.time() - start_time}
 
+def check_and_enter_ranking(client: AdbClient, reader: easyocr.Reader, out_dir: str) -> bool:
+    """
+    检查当前是否在活动主页，并点击'查看排行'进入排行榜。
+    """
+    print(">>> 检查当前页面状态...")
+    ensure_dir(out_dir)
+    screenshot_path = os.path.join(out_dir, "check_state.png")
+    client.screencap_to_file(screenshot_path)
+    
+    # 识别页面文字
+    results = reader.readtext(screenshot_path)
+    
+    # 目标关键词
+    target_text = "查看排行"
+    
+    found = False
+    click_x, click_y = 0, 0
+    
+    for bbox, text, conf in results:
+        if target_text in text:
+            print(f"识别到活动入口: '{text}' (置信度: {conf:.2f})")
+            # 计算中心点坐标
+            (tl, tr, br, bl) = bbox
+            center_x = int((tl[0] + br[0]) / 2)
+            center_y = int((tl[1] + br[1]) / 2)
+            
+            click_x, click_y = center_x, center_y
+            found = True
+            break
+    
+    if found:
+        print(f"执行点击进入排行榜: ({click_x}, {click_y})")
+        abd_command.tap(client, click_x, click_y)
+        time.sleep(5.0) # 等待转场动画
+        return True
+    else:
+        print(f"错误: 未识别到'{target_text}'按钮，请确保当前在活动主页。")
+        return False
+
+def run_crawler_for_tab(client: AdbClient, reader: easyocr.Reader, 
+                        tab_func, out_dir: str, anchor_filename: str, 
+                        do_search: bool = True) -> Tuple[Dict, List]:
+    """
+    运行单个 Tab (积分榜或最高记录榜) 的爬取流程
+    """
+    ensure_dir(out_dir)
+    
+    # 切换到对应的 Tab
+    print(f"\n>>> 切换 Tab 并初始化...")
+    tab_func(client)
+    time.sleep(3.0) # 等待页面切换
+    
+    # 初始化排名估算器 (每个榜单独立)
+    estimator = RankEstimator()
+    
+    # 1. 获取锚点数据
+    anchor_file = os.path.join(out_dir, anchor_filename)
+    if os.path.exists(anchor_file):
+        print(f"发现已有锚点数据 ({anchor_filename})，跳过采集。")
+        with open(anchor_file, 'r', encoding='utf-8') as f:
+            anchors = json.load(f)
+            anchors = {int(k): v for k, v in anchors.items()}
+    else:
+        anchors = get_anchors(client, reader, os.path.join(out_dir, 'anchors'))
+        with open(anchor_file, 'w', encoding='utf-8') as f:
+            json.dump(anchors, f, indent=2)
+    
+    # 将锚点数据加入估算器
+    for rank, score in anchors.items():
+        estimator.add_data(rank, score)
+        
+    # 2. 查找目标积分 (可选)
+    results = []
+    if do_search:
+        for target in TARGET_SCORES:
+            res = find_target_score(client, reader, target, anchors, estimator, os.path.join(out_dir, f'search_{target}'))
+            results.append(res)
+    else:
+        print(">>> 此榜单仅采集锚点，跳过目标积分搜索。")
+        
+    # 3. 提取关键排名的积分
+    key_ranks = [100, 1000, 5000, 10000]
+    targets_rank_score = {}
+    for r in key_ranks:
+        if r in anchors:
+            targets_rank_score[str(r)] = anchors[r]
+            
+    return targets_rank_score, results
+
 def main():
     total_start_time = time.time()
     
@@ -557,45 +646,36 @@ def main():
     print("初始化 OCR...")
     reader = easyocr.Reader(['ch_sim', 'en'], gpu=True)
     
-    # 初始化排名估算器
-    estimator = RankEstimator()
+    # --- Phase 0: 检查状态并进入 ---
+    if not check_and_enter_ranking(client, reader, args.out):
+        print("程序终止：无法进入排行榜页面。")
+        return
+
+    # --- Phase 1: 积分排行 ---
+    print("\n========== 开始抓取: 积分排行 ==========")
+    point_targets_rank_score, point_results = run_crawler_for_tab(
+        client, reader, 
+        abd_command.open_point_rank, 
+        os.path.join(args.out, 'point_rank'), 
+        'anchors_point.json'
+    )
     
-    # 1. 获取锚点数据
-    anchor_file = os.path.join(args.out, 'anchors.json')
-    if os.path.exists(anchor_file):
-        print("发现已有锚点数据，跳过采集。")
-        with open(anchor_file, 'r', encoding='utf-8') as f:
-            anchors = json.load(f)
-            # JSON key 是 str，需要转回 int
-            anchors = {int(k): v for k, v in anchors.items()}
-    else:
-        anchors = get_anchors(client, reader, os.path.join(args.out, 'anchors'))
-        
-        # 保存锚点数据
-        with open(anchor_file, 'w', encoding='utf-8') as f:
-            json.dump(anchors, f, indent=2)
-    
-    # 将锚点数据加入估算器
-    for rank, score in anchors.items():
-        estimator.add_data(rank, score)
-        
-    # 2. 查找目标积分
-    results = []
-    for target in TARGET_SCORES:
-        res = find_target_score(client, reader, target, anchors, estimator, os.path.join(args.out, f'search_{target}'))
-        results.append(res)
-        
-    # 3. 输出最终 JSON
-    # 提取关键排名的积分
-    key_ranks = [100, 1000, 5000, 10000]
-    targets_rank_score = {}
-    for r in key_ranks:
-        if r in anchors:
-            targets_rank_score[str(r)] = anchors[r]
+    # --- Phase 2: 最高记录排行 ---
+    print("\n========== 开始抓取: 最高记录排行 ==========")
+    # 最高记录榜仅采集锚点，不搜索目标积分
+    best_targets_rank_score, best_results = run_crawler_for_tab(
+        client, reader, 
+        abd_command.open_best_record_rank, 
+        os.path.join(args.out, 'best_record_rank'), 
+        'anchors_best.json',
+        do_search=False
+    )
             
+    # 最终合并结果
     final_data = {
-        'targetsRankScore': targets_rank_score,
-        'targets': results
+        'scoreRankTargets': point_results,
+        'scoreRankKeyPoints': point_targets_rank_score, 
+        'highestRankKeyPoints': best_targets_rank_score
     }
     
     with open(os.path.join(args.out, 'result.json'), 'w', encoding='utf-8') as f:
