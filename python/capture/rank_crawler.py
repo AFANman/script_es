@@ -2,6 +2,8 @@ import time
 import json
 import os
 import argparse
+import yaml  # 引入 PyYAML
+import requests # 引入 requests
 from typing import List, Dict, Tuple
 
 import easyocr
@@ -10,14 +12,14 @@ from python.capture import abd_command
 from python.capture.rank_estimator import RankEstimator
 from python.parse.activity_parser import parse_rank_page, parse_bottom_start_rank
 
-# 关键排名锚点
-ANCHOR_RANKS = [1, 100, 1000, 5000, 10000, 50000]
+# 关键排名锚点 (默认值，会被 config.json 覆盖)
+DEFAULT_ANCHOR_RANKS = [1, 100, 1000, 5000, 10000, 50000]
 
 # 每页固定显示数量
 ITEMS_PER_PAGE = 20
 
-# 目标积分
-TARGET_SCORES = [
+# 目标积分 (默认值，会被 config.json 覆盖)
+DEFAULT_TARGET_SCORES = [
     22000000,
     15000000,
     11000000,
@@ -25,11 +27,36 @@ TARGET_SCORES = [
     3500000
 ]
 
+# 导出关键排名 (默认值)
+DEFAULT_EXPORT_KEY_RANKS = [100, 1000, 5000, 10000]
+
+def load_config(config_path: str = 'config.yaml') -> Dict:
+    """加载配置文件 (YAML)"""
+    config = {
+        'anchor_ranks': DEFAULT_ANCHOR_RANKS,
+        'target_scores': DEFAULT_TARGET_SCORES,
+        'export_key_ranks': DEFAULT_EXPORT_KEY_RANKS
+    }
+    
+    if os.path.exists(config_path):
+        print(f"加载配置文件: {config_path}")
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                user_config = yaml.safe_load(f) # 使用 yaml 加载
+                if user_config:
+                    config.update(user_config)
+        except Exception as e:
+            print(f"配置文件加载失败: {e}，使用默认配置。")
+    else:
+        print(f"未找到配置文件 {config_path}，使用默认配置。")
+        
+    return config
+
 def ensure_dir(path):
     if not os.path.exists(path):
         os.makedirs(path)
 
-def get_anchors(client: AdbClient, reader: easyocr.Reader, out_dir: str) -> Dict[int, int]:
+def get_anchors(client: AdbClient, reader: easyocr.Reader, out_dir: str, anchor_ranks: List[int]) -> Dict[int, int]:
     """
     获取关键排名对应的积分
     """
@@ -47,7 +74,7 @@ def get_anchors(client: AdbClient, reader: easyocr.Reader, out_dir: str) -> Dict
     }
 
     print(">>> 开始采集关键排名锚点...")
-    for rank in ANCHOR_RANKS:
+    for rank in anchor_ranks:
         if rank not in rank_funcs:
             print(f"警告: 未定义的排名点击函数: {rank}")
             continue
@@ -581,7 +608,7 @@ def check_and_enter_ranking(client: AdbClient, reader: easyocr.Reader, out_dir: 
         return False
 
 def run_crawler_for_tab(client: AdbClient, reader: easyocr.Reader, 
-                        tab_func, out_dir: str, anchor_filename: str, 
+                        tab_func, out_dir: str, anchor_filename: str, config: Dict,
                         do_search: bool = True) -> Tuple[Dict, List]:
     """
     运行单个 Tab (积分榜或最高记录榜) 的爬取流程
@@ -604,7 +631,7 @@ def run_crawler_for_tab(client: AdbClient, reader: easyocr.Reader,
             anchors = json.load(f)
             anchors = {int(k): v for k, v in anchors.items()}
     else:
-        anchors = get_anchors(client, reader, os.path.join(out_dir, 'anchors'))
+        anchors = get_anchors(client, reader, os.path.join(out_dir, 'anchors'), config['anchor_ranks'])
         with open(anchor_file, 'w', encoding='utf-8') as f:
             json.dump(anchors, f, indent=2)
     
@@ -615,14 +642,14 @@ def run_crawler_for_tab(client: AdbClient, reader: easyocr.Reader,
     # 2. 查找目标积分 (可选)
     results = []
     if do_search:
-        for target in TARGET_SCORES:
+        for target in config['target_scores']:
             res = find_target_score(client, reader, target, anchors, estimator, os.path.join(out_dir, f'search_{target}'))
             results.append(res)
     else:
         print(">>> 此榜单仅采集锚点，跳过目标积分搜索。")
         
     # 3. 提取关键排名的积分
-    key_ranks = [100, 1000, 5000, 10000]
+    key_ranks = config['export_key_ranks']
     targets_rank_score = {}
     for r in key_ranks:
         if r in anchors:
@@ -630,44 +657,44 @@ def run_crawler_for_tab(client: AdbClient, reader: easyocr.Reader,
             
     return targets_rank_score, results
 
-def main():
+def run_task(device_id: str = None, out_dir: str = 'rank_data') -> str:
+    """
+    执行完整的爬取任务，并返回报告文本
+    """
     total_start_time = time.time()
+    ensure_dir(out_dir)
     
-    parser = argparse.ArgumentParser(description='偶像梦幻祭2 排名抓取')
-    parser.add_argument('--device', help='ADB Device ID')
-    parser.add_argument('--out', default='rank_data', help='输出目录')
-    args = parser.parse_args()
-    
-    ensure_dir(args.out)
-    
-    client = AdbClient(device_id=args.device)
+    client = AdbClient(device_id=device_id)
     client.connect()
+    
+    # 加载配置
+    config = load_config()
     
     print("初始化 OCR...")
     reader = easyocr.Reader(['ch_sim', 'en'], gpu=True)
     
     # --- Phase 0: 检查状态并进入 ---
-    if not check_and_enter_ranking(client, reader, args.out):
-        print("程序终止：无法进入排行榜页面。")
-        return
+    if not check_and_enter_ranking(client, reader, out_dir):
+        return "错误：无法进入排行榜页面，任务终止。"
 
     # --- Phase 1: 积分排行 ---
     print("\n========== 开始抓取: 积分排行 ==========")
     point_targets_rank_score, point_results = run_crawler_for_tab(
         client, reader, 
         abd_command.open_point_rank, 
-        os.path.join(args.out, 'point_rank'), 
-        'anchors_point.json'
+        os.path.join(out_dir, 'point_rank'), 
+        'anchors_point.json',
+        config
     )
     
     # --- Phase 2: 最高记录排行 ---
     print("\n========== 开始抓取: 最高记录排行 ==========")
-    # 最高记录榜仅采集锚点，不搜索目标积分
     best_targets_rank_score, best_results = run_crawler_for_tab(
         client, reader, 
         abd_command.open_best_record_rank, 
-        os.path.join(args.out, 'best_record_rank'), 
+        os.path.join(out_dir, 'best_record_rank'), 
         'anchors_best.json',
+        config,
         do_search=False
     )
             
@@ -678,11 +705,133 @@ def main():
         'highestRankKeyPoints': best_targets_rank_score
     }
     
-    with open(os.path.join(args.out, 'result.json'), 'w', encoding='utf-8') as f:
+    with open(os.path.join(out_dir, 'result.json'), 'w', encoding='utf-8') as f:
         json.dump(final_data, f, ensure_ascii=False, indent=2)
         
+    # 生成 TXT 报告
+    report_text = generate_report_text(final_data, config)
+    report_path = os.path.join(out_dir, 'result.txt')
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write(report_text)
+    
     total_elapsed = time.time() - total_start_time
-    print(f"\n全部任务完成！总耗时: {total_elapsed:.1f}s，结果已保存至 result.json")
+    print(f"\n全部任务完成！总耗时: {total_elapsed:.1f}s")
+    
+    return report_text
+
+def main():
+    parser = argparse.ArgumentParser(description='偶像梦幻祭2 排名抓取')
+    parser.add_argument('--device', help='ADB Device ID')
+    parser.add_argument('--out', default='rank_data', help='输出目录')
+    args = parser.parse_args()
+    
+    # 1. 执行任务
+    report_text = run_task(args.device, args.out)
+
+def generate_report_text(data: Dict, config: Dict = None) -> str:
+    lines = []
+    
+    # 默认配置 (兼容旧逻辑)
+    if config is None:
+        config = {}
+        
+    export_key_ranks = config.get('export_key_ranks', [100, 1000, 5000, 10000])
+    
+    # 1. 积分线统计 (从 scoreRankKeyPoints 获取)
+    lines.append("积分线统计")
+    key_points = data.get('scoreRankKeyPoints', {})
+    
+    # 按照 export_key_ranks 排序
+    for rank in export_key_ranks:
+        rank_str = str(rank)
+        score = key_points.get(rank_str, 0)
+        lines.append(f"{rank_str}位-{score:,}pt")
+    lines.append("")
+    
+    # 2. ★5线统计 (从 scoreRankTargets 获取)
+    lines.append("★5线统计")
+    targets = data.get('scoreRankTargets', [])
+    
+    # 获取文案映射
+    score_map = config.get('score_labels', {
+        3500000: "一卡",
+        7500000: "二卡",
+        11000000: "三卡",
+        15000000: "四卡",
+        22000000: "满破"
+    })
+    
+    # 对结果按分数排序 (从小到大)
+    sorted_targets = sorted(targets, key=lambda x: x['target'])
+    
+    for item in sorted_targets:
+        t_score = item['target']
+        rank = item.get('rank', '???')
+        # 格式化 rank (如果是数字，加千分位)
+        if isinstance(rank, int):
+            rank_str = f"{rank:,}"
+        else:
+            rank_str = str(rank)
+            
+        label = score_map.get(t_score, f"{t_score:,}pt")
+        # 格式: 一卡 3,500,000pt-4,966位
+        lines.append(f"{label} {t_score:,}pt-{rank_str}位")
+        
+    lines.append("")
+    
+    # 3. 奖杯分线统计 (从 highestRankKeyPoints 获取)
+    lines.append("奖杯分线统计")
+    high_points = data.get('highestRankKeyPoints', {})
+    
+    trophy_map = config.get('rank_labels', {
+        100: "(虹杯)",
+        1000: "(金杯)",
+        5000: "(银杯)",
+        10000: "(银杯)"
+    })
+    
+    for rank in export_key_ranks:
+        rank_str = str(rank)
+        score = high_points.get(rank_str, 0)
+        
+        # 尝试匹配 trophy prefix (优先尝试 int key，再尝试 str key)
+        prefix = trophy_map.get(rank, "")
+        if not prefix:
+             prefix = trophy_map.get(str(rank), "")
+             
+        lines.append(f"{prefix}{rank_str}位-{score:,}")
+        
+    lines.append("*20001位以下为铜杯")
+    
+    return "\n".join(lines)
+
+def get_access_token(app_id: str, client_secret: str) -> str:
+    """
+    获取 QQ 机器人 AccessToken
+    文档: https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/interface-framework/api-use.html
+    """
+    url = "https://bots.qq.com/app/getAppAccessToken"
+    payload = {
+        "appId": app_id,
+        "clientSecret": client_secret
+    }
+    
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            token = data.get("access_token")
+            if token:
+                print(f"[QQBot] 获取 AccessToken 成功，有效期 {data.get('expires_in')}秒")
+                return token
+            else:
+                print(f"[QQBot] 获取 AccessToken 失败: {data}")
+        else:
+            print(f"[QQBot] 获取 AccessToken HTTP 错误: {resp.status_code} {resp.text}")
+    except Exception as e:
+        print(f"[QQBot] 获取 AccessToken 异常: {e}")
+        
+    return ""
 
 if __name__ == '__main__':
     main()
